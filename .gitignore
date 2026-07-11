@@ -1,0 +1,17 @@
+# 敏感文件 - API Key
+.env
+
+# 向量库本地数据
+chroma_db/
+
+# Python 编译缓存
+__pycache__/
+*.pyc
+
+# 虚拟环境
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/

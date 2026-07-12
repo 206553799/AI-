@@ -62,13 +62,15 @@ class InventoryAgent:
         self.retriever.bm25 = BM25Retriever(bm25_texts)
 
         # ---- 注入 Reranker（重排序）----
-        from retrieval.bm25_retriever import DashScopeReranker
+        from retrieval.bm25_retriever import DashScopeReranker, LLMContextCompressor
         # 百炼 compatible-mode → api/v1 原生格式
         rerank_url = "https://ws-jk4wjarr474va1g3.cn-beijing.maas.aliyuncs.com/api/v1"
         self.retriever.reranker = DashScopeReranker(
             api_key=config.EMBEDDING_API_KEY,
             base_url=rerank_url,
         )
+        # 注入上下文压缩器（用同一个LLM做压缩）
+        self.retriever.compressor = LLMContextCompressor(self.llm)
 
         # ---- 检索工具 ----
         self.retrieval_tool = create_retrieval_tool(self.retriever)
@@ -98,20 +100,27 @@ class InventoryAgent:
 
     # ==================== 对话接口 ====================
 
+    def _expand_query(self, user_input: str) -> list[str]:
+        """用 LLM 把用户问题扩展为多个检索查询"""
+        prompt = f"""将下面的用户问题改写成 3 个不同的检索查询，用于搜索知识库。每个查询一行，只输出查询词，不要编号和解释。
+
+用户问题: {user_input}"""
+        try:
+            response = self.llm.invoke(prompt)
+            lines = [l.strip() for l in str(response.content).strip().split("\n") if l.strip()]
+            return [user_input] + lines[:3]
+        except Exception:
+            return [user_input]
+
     def chat(self, user_input: str) -> str:
         """
         处理用户输入并返回 Agent 回答。
-
-        参数:
-            user_input: 用户输入的自然语言文本
-
-        返回:
-            Agent 的回答
         """
-        # Step 1: 检索相关知识
-        retrieved_context = self.retriever.retrieve_as_context(user_input)
+        # Step 1: 多查询检索 + 上下文压缩
+        queries = self._expand_query(user_input)
+        retrieved_context = self.retriever.retrieve_compressed(queries)
 
-        # Step 2: 构建系统消息（每次动态注入检索结果）
+        # Step 2: 构建系统消息
         system_msg = SystemMessage(
             content=f"{SYSTEM_PROMPT}\n\n## 知识库检索结果\n{retrieved_context}"
         )

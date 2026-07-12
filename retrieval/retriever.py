@@ -20,6 +20,7 @@ class Retriever:
         self.vm = vector_manager
         self.bm25 = None      # BM25 检索器
         self.reranker = None  # 重排序器
+        self.compressor = None  # 上下文压缩器
         
 
     # ==================== 通用检索 ====================
@@ -152,6 +153,45 @@ class Retriever:
             if ranked:
                 return [(candidates[i][0], score) for i, score in ranked]
         return candidates[:k]
+
+    def retrieve_multi_query(self, queries: list[str], k: int | None = None) -> list[tuple[Document, float]]:
+        """多查询召回：多个改写查询各自检索，结果合并去重后 Rerank"""
+        k = k or config.RETRIEVAL_TOP_K
+        all_results = []
+        for q in queries:
+            results = self.retrieve_hybrid(q, k=k * 2)
+            all_results.extend(results)
+        # 去重（保留最高分）
+        seen: dict[int, tuple[Document, float]] = {}
+        for doc, score in all_results:
+            key = hash(doc.page_content)
+            if key not in seen or score > seen[key][1]:
+                seen[key] = (doc, score)
+        candidates = list(seen.values())
+        # Rerank
+        if self.reranker and candidates:
+            docs = [doc.page_content for doc, _ in candidates]
+            ranked = self.reranker.rerank(queries[0], docs, top_n=k)
+            if ranked:
+                return [(candidates[i][0], score) for i, score in ranked]
+        return sorted(candidates, key=lambda x: -x[1])[:k]
+
+    def retrieve_compressed(self, queries: list[str], k: int | None = None) -> str:
+        """多查询召回 + 上下文压缩 → 直接返回压缩后的文本"""
+        k = k or config.RETRIEVAL_TOP_K
+        candidates = self.retrieve_multi_query(queries, k=k)
+        if not candidates:
+            return "（未检索到相关内容）"
+        if self.compressor:
+            docs = [doc.page_content for doc, _ in candidates]
+            compressed = self.compressor.compress(queries[0], docs)
+        else:
+            compressed = [doc.page_content for doc, _ in candidates]
+
+        parts = []
+        for i, doc in enumerate(compressed, 1):
+            parts.append(f"[片段 {i}]\n{doc}")
+        return "\n\n".join(parts)
 
     # ==================== 后处理 ====================
 

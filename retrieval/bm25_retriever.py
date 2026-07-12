@@ -76,3 +76,33 @@ class DashScopeReranker:
         except Exception:
             # Rerank 失败时返回原始顺序，上游会跳过
             return []
+
+
+# ==================== Context Compressor ====================
+
+class LLMContextCompressor:
+    """LLM 上下文压缩 — 从文档中只提取跟问题相关的句子"""
+
+    def __init__(self, llm):
+        self.llm = llm
+
+    def compress(self, query: str, documents: list[str]) -> list[str]:
+        """返回压缩后的文档列表"""
+        compressed = []
+        for doc in documents:
+            if len(doc) < 200:
+                compressed.append(doc)  # 短文档不压缩
+                continue
+            try:
+                prompt = f"""从以下文档中只提取跟问题相关的句子。只输出相关句子，不要任何解释。如果没有相关句子，输出"不相关"。
+
+问题: {query}
+
+文档: {doc}"""
+                response = self.llm.invoke(prompt)
+                content = str(response.content).strip()
+                if content and "不相关" not in content:
+                    compressed.append(content)
+            except Exception:
+                compressed.append(doc)  # 压缩失败保留原文
+        return compressed

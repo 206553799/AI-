@@ -36,7 +36,7 @@ from prompts.system_prompts import SYSTEM_PROMPT
 from retrieval.vector_store import VectorStoreManager
 from retrieval.document_loader import DocumentLoader
 from retrieval.retriever import Retriever, create_retrieval_tool
-
+from retrieval.bm25_retriever import BM25Retriever
 
 class InventoryAgent:
     """库存与订单管理智能体"""
@@ -54,6 +54,21 @@ class InventoryAgent:
         self.vector_manager = VectorStoreManager()
         self._init_vector_store()
         self.retriever = Retriever(self.vector_manager)
+
+        # ---- 注入 BM25（混合检索用）----
+        loader = DocumentLoader()
+        all_docs = loader.load_directory()
+        bm25_texts = [d.page_content for d in all_docs]
+        self.retriever.bm25 = BM25Retriever(bm25_texts)
+
+        # ---- 注入 Reranker（重排序）----
+        from retrieval.bm25_retriever import DashScopeReranker
+        # 百炼 compatible-mode → api/v1 原生格式
+        rerank_url = "https://ws-jk4wjarr474va1g3.cn-beijing.maas.aliyuncs.com/api/v1"
+        self.retriever.reranker = DashScopeReranker(
+            api_key=config.EMBEDDING_API_KEY,
+            base_url=rerank_url,
+        )
 
         # ---- 检索工具 ----
         self.retrieval_tool = create_retrieval_tool(self.retriever)

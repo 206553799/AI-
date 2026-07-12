@@ -18,6 +18,9 @@ class Retriever:
 
     def __init__(self, vector_manager: VectorStoreManager):
         self.vm = vector_manager
+        self.bm25 = None      # BM25 检索器
+        self.reranker = None  # 重排序器
+        
 
     # ==================== 通用检索 ====================
 
@@ -80,17 +83,75 @@ class Retriever:
         返回:
             格式化后的上下文字符串
         """
-        docs = self.retrieve(query, k=k)
-        if not docs:
+        results = self.retrieve_with_rerank(query, k=k)
+        if not results:
             return "（未检索到相关内容）"
 
         parts = []
-        for i, doc in enumerate(docs, 1):
-            source = doc.metadata.get("source", "未知来源")
-            content = doc.page_content.strip()
-            parts.append(f"[片段 {i}] 来源: {source}\n{content}")
+        for i, (doc, score) in enumerate(results, 1):
+            source = doc.metadata.get("source", "未知来源") if hasattr(doc, 'metadata') else "未知来源"
+            content = doc.page_content.strip() if hasattr(doc, 'page_content') else str(doc).strip()
+            parts.append(f"[片段 {i}] 来源: {source} (分数: {score:.3f})\n{content}")
 
         return "\n\n".join(parts)
+    
+    # ==================== 混合检索 ====================
+
+    def retrieve_hybrid(self, query: str, k: int | None = None) -> list[tuple[Document, float]]:
+        """
+        BM25 + 向量 双路召回，RRF 融合排序。
+
+        返回: [(Document, fused_score), ...] 按分数降序
+        """
+        k = k or config.RETRIEVAL_TOP_K
+
+        # 路1：向量检索 (多拿一些候选)
+        vector_docs = self.vm.similarity_search(query, k=k * 3)
+
+        # 路2：BM25 关键词检索
+        bm25_results = self.bm25.search(query, k=k * 3) if self.bm25 else []
+        bm25_docs = [(self.bm25.docs[i], score) for i, score in bm25_results]
+
+        # RRF 融合
+        return self._rrf_fusion(vector_docs, bm25_docs, k=k)
+
+    def _rrf_fusion(self, docs_a: list[Document], docs_b: list[tuple[str, float]],
+                    k: int = 4, rrf_k: int = 60) -> list[tuple[Document, float]]:
+        """
+        Reciprocal Rank Fusion：多路结果融合，不依赖分数绝对值。
+        """
+        scores: dict[int, float] = {}
+        doc_map: dict[int, Document] = {}
+
+        # 路1：按排名贡献分数
+        for rank, doc in enumerate(docs_a):
+            key = hash(doc.page_content)
+            doc_map[key] = doc
+            scores[key] = scores.get(key, 0) + 1.0 / (rrf_k + rank + 1)
+
+        # 路2：BM25 结果
+        for rank, (text, _) in enumerate(docs_b):
+            key = hash(text)
+            if key not in doc_map:
+                doc_map[key] = Document(page_content=text)
+            scores[key] = scores.get(key, 0) + 1.0 / (rrf_k + rank + 1)
+
+        # 按 RRF 分数排序
+        ranked = sorted(scores.items(), key=lambda x: -x[1])[:k]
+        return [(doc_map[key], score) for key, score in ranked]
+
+    def retrieve_with_rerank(self, query: str, k: int | None = None,
+                             candidate_k: int = 12) -> list[tuple[Document, float]]:
+        """混合检索 + 重排序：先多拿候选，再用 Reranker 精排取 Top-K"""
+        k = k or config.RETRIEVAL_TOP_K
+        candidates = self.retrieve_hybrid(query, k=candidate_k)
+
+        if self.reranker and candidates:
+            docs = [doc.page_content for doc, _ in candidates]
+            ranked = self.reranker.rerank(query, docs, top_n=k)
+            if ranked:
+                return [(candidates[i][0], score) for i, score in ranked]
+        return candidates[:k]
 
     # ==================== 后处理 ====================
 
